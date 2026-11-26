@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.dispatch_registry import registry
 from app.store import store
 
 
@@ -96,17 +97,11 @@ class VersionRollbackService(BaseModuleService):
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return 0
-        receipts = store.rows("dist_receipt")
-        receipt_id = max((int(r.get("id", 0)) for r in receipts), default=0) + 1
-        receipts.append({
-            "id": receipt_id,
-            "回执编号": f"rc-rollback-{receipt_id}",
-            "分发批次": "",
-            "订阅方": str(entry.get("影响订阅方", "")),
-            "回执状态": "已回收",
-            "差异说明": f"回滚到 {entry.get('目标版本', '')}",
-            "status": "已回收",
-            "pending": False,
-            "abnormal": False,
-        })
-        return receipt_id
+        receipt = registry.register_receipt(
+            number_style="rollback",
+            subscriber=str(entry.get("影响订阅方", "") or ""),
+            status="已回收",
+            diff=f"回滚到 {entry.get('目标版本', '')}",
+            extra={"pending": False, "abnormal": False},
+        )
+        return int(receipt["id"])

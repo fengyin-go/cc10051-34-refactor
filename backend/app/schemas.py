@@ -29,3 +29,7 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+    version: str | None = None
+    batch_no: str | None = None
+    credential: str | None = None
+    values: dict[str, Any] | None = None

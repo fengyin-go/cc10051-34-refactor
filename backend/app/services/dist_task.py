@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.dispatch_registry import registry
 from app.store import store
 
 
@@ -23,6 +24,11 @@ class DistTaskService(BaseModuleService):
     NEGATIVE_ACTIONS = []
 
     # ---- 业务扩展：版本分发与回执回收 ----
+
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """通用登记入口也使用统一编号锁，避免与两个业务入口争用 max(id)+1。"""
+        with registry.lock:
+            return super().create_entry(values)
 
     def dispatch_batch(self, entry_id: int) -> dict[str, Any]:
         """执行分发：校验订阅方生效后置为分发中。"""
@@ -47,20 +53,68 @@ class DistTaskService(BaseModuleService):
         entry["分发状态"] = "已送达"
         entry["回执状态"] = "已回收"
         entry["pending"] = False
-        receipts = store.rows("dist_receipt")
-        receipt_id = max((int(r.get("id", 0)) for r in receipts), default=0) + 1
-        receipts.append({
-            "id": receipt_id,
-            "回执编号": f"rc-{entry_id}-{receipt_id}",
-            "分发批次": entry.get("分发批次", ""),
-            "订阅方": entry.get("订阅方", ""),
-            "回执状态": "已回收",
-            "差异说明": "",
-            "status": "已回收",
-            "pending": False,
-            "abnormal": False,
-        })
-        return {"ok": True, "receipt_id": receipt_id}
+        receipt = registry.register_receipt(
+            number_style="task",
+            task_entry_id=entry_id,
+            batch_no=str(entry.get("分发批次", "") or ""),
+            subscriber=str(entry.get("订阅方", "") or ""),
+            status="已回收",
+            diff="",
+            extra={"pending": False, "abnormal": False},
+        )
+        return {"ok": True, "receipt_id": receipt["id"]}
+
+    def find_task_by_batch(self, batch_no: str) -> dict[str, Any] | None:
+        """按旧批次号返回分发任务行本身。"""
+        return registry.find_task_by_batch(batch_no)
+
+    def get_by_batch(
+        self,
+        batch_no: str,
+        *,
+        credential: str = "",
+        subscriber: str = "",
+        version: str = "",
+    ) -> dict[str, Any]:
+        """按旧分发批次号读取本行，并明确返回原收件方与原发放版本。"""
+        return registry.claim_batch(
+            batch_no=batch_no,
+            credential=credential,
+            subscriber=subscriber,
+            version=version,
+        )
+
+    claim_by_batch = get_by_batch
+    open_registration = get_by_batch
+    get_by_batch_no = get_by_batch
+    open_by_batch_no = get_by_batch
+
+    def sign_by_batch(self, batch_no: str) -> dict[str, Any]:
+        """分发任务页按旧批次号办理签收；不使用其他行补齐收件方或版本。"""
+        claimed = registry.claim_batch(batch_no=batch_no)
+        if not claimed.get("ok"):
+            return claimed
+        task = claimed["task"]
+        task_id = int(task["id"])
+        if task.get("status") == "排队中":
+            dispatch = self.dispatch_batch(task_id)
+            if not dispatch.get("ok"):
+                return dispatch
+        if task.get("status") == "已送达":
+            receipt = next((
+                r for r in store.rows("dist_receipt")
+                if r.get("分发批次") == batch_no and r.get("回执状态") == "已回收"
+            ), None)
+            return {
+                "ok": True,
+                "message": "批次已签收",
+                "receipt_id": receipt.get("id") if receipt else None,
+                **claimed,
+            }
+        result = self.confirm_delivery(task_id)
+        if result.get("ok"):
+            result.update(registry.describe_task(task) or {})
+        return result
 
     def fail_and_requeue(self, entry_id: int, reason: str) -> dict[str, Any]:
         """标记分发失败，保留断点供重试。"""

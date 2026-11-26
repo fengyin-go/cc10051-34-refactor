@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.dispatch_registry import registry
 from app.store import store
 
 
@@ -24,14 +25,18 @@ class DistReceiptService(BaseModuleService):
 
     # ---- 业务扩展：回执核对与差异处置 ----
 
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """回执通用登记也纳入同一编号锁，避免和签收回执争用编号。"""
+        with registry.lock:
+            return super().create_entry(values)
+
     def verify_receipt(self, entry_id: int) -> dict[str, Any]:
         """核对回执：按分发批次校验记录数一致性。"""
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return {"ok": False, "message": "回执记录不存在"}
         batch = entry.get("分发批次", "")
-        task = next((t for t in store.rows("dist_task")
-                     if t.get("分发批次") == batch), None)
+        task = registry.find_task_by_batch(str(batch))
         if task is None:
             entry["status"] = "未回收"
             entry["差异说明"] = "分发批次不存在"
@@ -43,6 +48,66 @@ class DistReceiptService(BaseModuleService):
         entry["status"] = "部分回收"
         entry["差异说明"] = f"分发状态为 {task.get('status')}"
         return {"ok": False, "message": "回执与分发结果不一致"}
+
+    def verify_by_batch(
+        self,
+        batch_no: str,
+        *,
+        subscriber: str = "",
+        version: str = "",
+        credential: str = "",
+    ) -> dict[str, Any]:
+        """回执中心按旧分发批次号核对，不依赖发布页或订阅方页上下文。"""
+        claimed = registry.claim_batch(
+            batch_no=batch_no,
+            credential=credential,
+            subscriber=subscriber,
+            version=version,
+        )
+        if not claimed.get("ok"):
+            return claimed
+
+        task = claimed["task"]
+        receipt = next((
+            r for r in store.rows(self.MODULE)
+            if r.get("分发批次") == batch_no
+        ), None)
+        if receipt is not None:
+            result = self.verify_receipt(int(receipt["id"]))
+            result["receipt_id"] = receipt.get("id")
+            result["回执编号"] = receipt.get("回执编号", "")
+        else:
+            result = {
+                "ok": task.get("status") == "已送达",
+                "message": "尚未登记回执" if task.get("status") != "已送达" else "批次已送达但缺少回执",
+                "batch_no": batch_no,
+                "分发批次": batch_no,
+            }
+        # 新查证入口在独立返回中明确带回本行的原发放版本和原始订阅方；
+        # 旧 verify_receipt(entry_id) 的返回结构保持原样。
+        result.update(registry.describe_task(task) or {})
+        result.setdefault("batch_no", batch_no)
+        result["分发批次"] = batch_no
+        return result
+
+    def sign_and_verify_by_batch(self, batch_no: str) -> dict[str, Any]:
+        """按旧批次完成原签收，再回到回执中心核对。"""
+        from app.services.dist_task import DistTaskService
+
+        sign_result = DistTaskService().sign_by_batch(batch_no)
+        verify_result = self.verify_by_batch(batch_no)
+        return {
+            "ok": bool(sign_result.get("ok")) and bool(verify_result.get("ok")),
+            "sign": sign_result,
+            "verify": verify_result,
+            **verify_result,
+        }
+
+    submit_receipt = verify_by_batch
+    handle_by_old_number = sign_and_verify_by_batch
+    verify_by_batch_no = verify_by_batch
+    check_by_batch = verify_by_batch
+    verify_old_number = verify_by_batch
 
     def mark_diff(self, entry_id: int, diff: str) -> str:
         """标记回执差异并把分发任务置为失败重试。"""

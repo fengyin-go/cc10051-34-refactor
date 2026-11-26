@@ -4,6 +4,57 @@ import type { ActionResult, EntryRow, OverviewResult, PageResult } from '@/data/
 
 export { moduleMeta }
 
+export type DispatchResult = ActionResult & {
+  [key: string]: unknown
+}
+
+async function postJson(url: string, body: Record<string, unknown> = {}): Promise<DispatchResult> {
+  const response = await request(url, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  return await response.json() as DispatchResult
+}
+
+async function getJson(url: string): Promise<DispatchResult> {
+  const response = await request(url)
+  if (!response.ok) throw new Error('分发登记查询失败')
+  return await response.json() as DispatchResult
+}
+
+export async function fanoutPublishGroup(publishId: number): Promise<DispatchResult> {
+  return postJson(`/api/dispatch/golden-publishes/${publishId}/fanout`)
+}
+
+export async function resumePublishGroup(publishId: number): Promise<DispatchResult> {
+  return postJson(`/api/dispatch/golden-publishes/${publishId}/resume`)
+}
+
+export async function getPublishGroup(publishId: number): Promise<DispatchResult> {
+  return getJson(`/api/dispatch/golden-publishes/${publishId}`)
+}
+
+export async function produceSubscriberDispatch(
+  subscriberId: number,
+  version: string,
+): Promise<DispatchResult> {
+  return postJson(`/api/dispatch/subscribers/${subscriberId}/produce`, { version })
+}
+
+export async function openDispatchRegistration(ref: string): Promise<DispatchResult> {
+  const query = new URLSearchParams({ ref }).toString()
+  return getJson(`/api/dispatch/open?${query}`)
+}
+
+export async function verifyDispatchByBatch(batchNo: string): Promise<DispatchResult> {
+  const query = new URLSearchParams({ batch_no: batchNo }).toString()
+  return getJson(`/api/dispatch/receipts/verify-batch?${query}`)
+}
+
+export async function signDispatchByBatch(batchNo: string): Promise<DispatchResult> {
+  return postJson('/api/dispatch/sign-by-batch', { batch_no: batchNo })
+}
+
 export async function listEntries(
   key: string,
   filters: Record<string, string> = {},

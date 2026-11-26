@@ -34,6 +34,11 @@ def overview() -> dict[str, object]:
     return store.overview()
 
 
+# 分发登记的模块式兼容路径先注册；随后注册 /api/dispatch 专用路由和通用资源路由。
+from app.routers import dispatch as dispatch_router_module
+
+app.include_router(dispatch_router_module.root_router)
+
 # 资源路由含 /api/{module}，必须放在 health / overview 之后注册，
 # 否则固定路径会被动态路径抢先匹配。
 for module in ROUTERS:

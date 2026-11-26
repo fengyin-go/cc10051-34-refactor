@@ -16,7 +16,13 @@ class Store:
         }
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        # 分发登记处的申请/凭据表是内部协作状态，不作为第 21 个业务模块
+        # 暴露给健康检查和治理概览。
+        return sorted(
+            name for name in self._tables
+            if not name.startswith("_")
+            and name not in {"dispatch_application", "dispatch_request", "dispatch_arrangement"}
+        )
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
